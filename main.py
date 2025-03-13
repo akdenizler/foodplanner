@@ -2,12 +2,15 @@ import streamlit as st
 import requests
 import json
 import re
-from PIL import Image
+import dotenv
 import os
-from google.cloud import vision
+from PIL import Image
+import matplotlib.pyplot as plt
+
+dotenv.load_dotenv()
 
 # === Configuration for Mistral API ===
-MISTRAL_API_KEY = "YOUR_MISTRAL_API_KEY"  # Replace with your actual Mistral API key
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 # === API Call Functions ===
@@ -51,7 +54,6 @@ def generate_meal_plan(profile):
     try:
         response = requests.post(MISTRAL_API_URL, headers=headers, json=payload)
         response.raise_for_status()
-        
         result = response.json()
         meal_plan = result["choices"][0]["message"]["content"]
     except Exception as e:
@@ -64,134 +66,80 @@ def parse_meal_plan_by_day(meal_plan_text):
     Parse the meal plan text to extract daily meal plans.
     Returns a dictionary with days as keys and meal content as values.
     """
-    # Dictionary to store the meal plans for each day
     daily_plans = {}
-    
     # Regular expression to find day headers (DAY X: DAY_NAME)
     day_pattern = r'DAY\s+\d+\s*:\s*([A-Z]+)'
-    
-    # Find all day headers
     day_matches = list(re.finditer(day_pattern, meal_plan_text, re.IGNORECASE))
     
-    # Extract content for each day
     for i, match in enumerate(day_matches):
         day_name = match.group(1).capitalize()
         start_pos = match.start()
-        
-        # If this is not the last day, the end position is the start of the next day
-        if i < len(day_matches) - 1:
-            end_pos = day_matches[i + 1].start()
-        else:
-            end_pos = len(meal_plan_text)
-        
-        # Extract the text for this day
+        end_pos = day_matches[i + 1].start() if i < len(day_matches) - 1 else len(meal_plan_text)
         day_content = meal_plan_text[start_pos:end_pos].strip()
         daily_plans[day_name] = day_content
-    
-    # If parsing fails, create a fallback
+
     if not daily_plans:
-        daily_plans = {
-            "Full Plan": meal_plan_text
-        }
+        daily_plans = {"Full Plan": meal_plan_text}
     
     return daily_plans
 
 def recognize_food(image_bytes):
     """
-    Recognize food items in an image using Google Cloud Vision API.
+    Placeholder for food recognition. Mistral API doesn't support image recognition for food.
     """
-    try:
-        # Create a client for the Vision API
-        client = vision.ImageAnnotatorClient()
-        
-        # Create an image instance
-        image = vision.Image(content=image_bytes)
-        
-        # Perform label detection on the image
-        response = client.label_detection(image=image)
-        labels = response.label_annotations
-        
-        # Filter for food-related labels
-        food_labels = []
-        food_keywords = ["food", "dish", "meal", "cuisine", "vegetable", "fruit", "meat", "dessert", 
-                        "breakfast", "lunch", "dinner", "snack", "ingredient", "recipe", "plate"]
-        
-        for label in labels:
-            # Check if the label is food-related
-            is_food = any(keyword in label.description.lower() for keyword in food_keywords) or label.score > 0.7
-            if is_food:
-                food_labels.append({
-                    "description": label.description,
-                    "score": f"{label.score:.2f}"
-                })
-        
-        # If no food labels are detected
-        if not food_labels:
-            return "No food items detected in this image. Try uploading a clearer image of your meal."
-        
-        # Get nutritional information using Mistral API for the detected food items
-        food_items = [label["description"] for label in food_labels]
-        nutritional_info = get_food_nutrition(food_items)
-        
-        # Combine results
-        result = {
-            "detected_items": food_labels,
-            "nutritional_info": nutritional_info
-        }
-        
-        return result
-        
-    except Exception as e:
-        return f"Error recognizing food: {str(e)}"
+    return "Food recognition functionality using Mistral API is not available. Please use an alternative service."
 
-def get_food_nutrition(food_items):
+def plot_nutrient_levels_for_day(day, day_plan_text):
     """
-    Get nutritional information for detected food items using Mistral API.
+    Extract nutrient levels from the day's meal plan text, plot a bar chart,
+    and if any key nutrient is missing, return a suggestions string.
+    
+    Expected nutrients: Calories, Protein, Carbs, Fat, Fiber.
     """
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {MISTRAL_API_KEY}"
-    }
+    expected_nutrients = ["Calories", "Protein", "Carbs", "Fat", "Fiber"]
+    nutrient_values = {}
+
+    # Look for patterns like "Protein: 30" in the text (units are ignored)
+    for nutrient in expected_nutrients:
+        pattern = rf"{nutrient}\s*:\s*([\d\.]+)"
+        match = re.search(pattern, day_plan_text, re.IGNORECASE)
+        if match:
+            try:
+                nutrient_values[nutrient] = float(match.group(1))
+            except ValueError:
+                pass
+
+    missing_nutrients = [nutrient for nutrient in expected_nutrients if nutrient not in nutrient_values]
     
-    # Build prompt for nutrition information
-    food_list = ", ".join(food_items)
-    prompt = (
-        f"As a nutrition expert, please provide a short nutritional analysis for these food items: {food_list}. "
-        "Include estimated calories, macronutrients (protein, carbs, fat), and key micronutrients where applicable. "
-        "Keep the analysis concise and informative."
-    )
+    # Create bar chart
+    fig, ax = plt.subplots(figsize=(10, 5))
+    if nutrient_values:
+        ax.bar(nutrient_values.keys(), nutrient_values.values(), color='skyblue')
+        ax.set_title(f"Nutrient Levels for {day}")
+        ax.set_ylabel("Amount")
+        ax.set_xlabel("Nutrient")
+    else:
+        ax.text(0.5, 0.5, "No nutrient data found", horizontalalignment='center', verticalalignment='center')
+        ax.axis('off')
     
-    payload = {
-        "model": "mistral-large-latest",
-        "messages": [
-            {"role": "system", "content": "You are a nutrition expert providing concise food analysis."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3,
-        "max_tokens": 300
-    }
+    suggestion_text = ""
+    if missing_nutrients:
+        suggestions = {
+            "Calories": "Consider adding an energy-rich snack like a granola bar.",
+            "Protein": "Consider a protein snack such as Greek yogurt or a protein shake.",
+            "Carbs": "Consider a carb-based snack like a piece of fruit or whole grain crackers.",
+            "Fat": "Consider a healthy fat source like nuts or avocado toast.",
+            "Fiber": "Consider fiber-rich options like vegetables or whole grains."
+        }
+        suggestion_text = "Missing Nutrients:\n"
+        for nutrient in missing_nutrients:
+            suggestion_text += f"- {nutrient}: {suggestions.get(nutrient, 'Consider a nutrient-rich snack.')}\n"
     
-    try:
-        response = requests.post(MISTRAL_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
-    except Exception as e:
-        return f"Error getting nutritional info: {str(e)}"
+    return fig, suggestion_text
 
 # === Streamlit UI ===
 def main():
     st.title("🍽 AI-Powered Meal Plan Generator")
-    
-    # Check for Google Cloud credentials
-    if 'GOOGLE_APPLICATION_CREDENTIALS' not in os.environ:
-        st.sidebar.warning("Google Cloud credentials not set. Food recognition may not work properly.")
-        st.sidebar.info(
-            "To set up credentials, create a service account key and set the environment variable:\n\n"
-            "```\nos.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/Users/denizasuleymanova/python_3/FOODBOT3000/foodapp-453613-16f8a603a026.json'\n```\n\n"
-            "You can add this at the top of your script or use a .env file."
-        )
     
     # Initialize session state for storing the meal plan
     if 'meal_plan' not in st.session_state:
@@ -200,8 +148,6 @@ def main():
         st.session_state.daily_plans = {}
     if 'current_day' not in st.session_state:
         st.session_state.current_day = None
-    if 'food_log' not in st.session_state:
-        st.session_state.food_log = []
     
     # User Profile Setup
     st.sidebar.header("User Profile Setup")
@@ -247,70 +193,47 @@ def main():
     
     # Display meal plan with day selection buttons
     if st.session_state.meal_plan:
-        # Create buttons for days of the week
         st.subheader("Navigate Your Meal Plan")
         cols = st.columns(len(st.session_state.daily_plans))
-        
         for i, day in enumerate(st.session_state.daily_plans.keys()):
             if cols[i].button(day):
                 st.session_state.current_day = day
         
-        # Display the selected day's meal plan
         if st.session_state.current_day:
             st.markdown(f"### {st.session_state.current_day}'s Meal Plan")
             st.markdown(st.session_state.daily_plans[st.session_state.current_day])
+            
+            # Plot nutrient levels for the selected day and show suggestions if needed
+            fig, suggestion_text = plot_nutrient_levels_for_day(
+                st.session_state.current_day,
+                st.session_state.daily_plans[st.session_state.current_day]
+            )
+            st.pyplot(fig)
+            if suggestion_text:
+                st.markdown("### Suggestions to Fill Nutrient Gaps")
+                st.write(suggestion_text)
         
-        # Option to view the complete meal plan
         with st.expander("View Complete Meal Plan"):
             st.markdown("### Your Complete 7-Day Meal Plan")
             st.write(st.session_state.meal_plan)
     
-#    # Food Recognition Section
-#    st.header("Food Recognition & Logging")
-#    uploaded_file = st.file_uploader("Upload an image of your meal", type=["jpg", "jpeg", "png"])
-#    
-#    if uploaded_file is not None:
-#        image = Image.open(uploaded_file)
-#        st.image(image, caption="Uploaded Meal", use_column_width=True)
-#        
-#        if st.button("Recognize Food"):
-#            with st.spinner("Analyzing your food with Google Cloud Vision API..."):
-#                food_info = recognize_food(uploaded_file.getvalue())
-#                
-#                st.markdown("### Food Analysis Results")
-#                
-#                if isinstance(food_info, dict):
-#                    # Display detected food items
-#                    st.subheader("Detected Food Items")
-#                    for item in food_info["detected_items"]:
-#                        st.write(f"• {item['description']} (Confidence: {item['score']})")
-#                    
-#                    # Display nutritional information
-#                    st.subheader("Nutritional Information")
-#                    st.write(food_info["nutritional_info"])
-#                    
-#                    # Add to food log
-#                    log_entry = {
-#                       "day": st.session_state.current_day if st.session_state.current_day else "Unknown",
-#                        "time": "Current time",
-#                        "items": [item["description"] for item in food_info["detected_items"]],
-#                        "nutrition": food_info["nutritional_info"]
-#                    }
-#                    
-#                    st.session_state.food_log.append(log_entry)
-#                else:
-#                    st.write(food_info)  # Display error message
+    # Food Recognition Section
+    st.header("Food Recognition & Logging")
+    uploaded_file = st.file_uploader("Upload an image of your meal", type=["jpg", "jpeg", "png"])
+    
+    if uploaded_file is not None:
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Uploaded Meal", use_column_width=True)
+        
+        if st.button("Recognize Food"):
+            with st.spinner("Analyzing your food..."):
+                food_info = recognize_food(uploaded_file.getvalue())
+                st.markdown("### Food Information")
+                st.write(food_info)
     
     # Meal Plan History
-    st.header("Food Log")
-    if st.session_state.food_log:
-        for i, entry in enumerate(st.session_state.food_log):
-            with st.expander(f"Meal {i+1} - {entry['day']}"):
-                st.write(f"**Items detected:** {', '.join(entry['items'])}")
-                st.write("**Nutritional Analysis:**")
-                st.write(entry['nutrition'])
-    else:
-        st.write("No food logged yet. Use the Food Recognition feature to start logging your meals.")
+    st.header("Meal Plan History")
+    st.write("This feature is not implemented yet. In a complete solution, you'd save and display past meal plans here.")
 
 if __name__ == "__main__":
     main()
