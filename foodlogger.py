@@ -1,43 +1,69 @@
 import streamlit as st
-import base64
-import os
 import requests
-import dotenv
-import json
 import re
 from PIL import Image
-import matplotlib.pyplot as plt
+import io
+import datetime
+import pandas as pd
+import uuid
+import os
+import base64
+import dotenv
 from mistralai import Mistral
+import json
 
 dotenv.load_dotenv()
+# === Configuration for APIs ===
+# Store API keys in environment variables or Streamlit secrets
+api_key = os.environ.get("MISTRAL_API_KEY")
+MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
-# === Configuration for Mistral API ===
-# For meal plan generation, we use the HTTP endpoint.
-MEAL_PLAN_API_KEY = os.environ.get("MISTRAL_API_KEY")
-MEAL_PLAN_API_URL = "https://api.mistral.ai/v1/chat/completions"
-# For food recognition, we use the Mistral Python client.
-FOOD_MODEL = "pixtral-12b-2409"
+def get_mistral_api_key():
+    """Helper function to get the Mistral API key."""
+    return os.environ.get("MISTRAL_API_KEY")
 
-# ============================
-# Functions for Meal Plan Generator
-# ============================
-def generate_meal_plan(profile):
+# === Collapsible Meal Plan Display (New) ===
+def display_collapsible_meal_plan(day_content):
     """
-    Generate a personalized 7-day meal plan using Mistral AI API.
+    Minimal example that places each meal in an expander.
+    Replace these placeholders with real parsing logic if desired.
     """
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {MEAL_PLAN_API_KEY}"
-    }
+    with st.expander("Breakfast"):
+        st.write("Placeholder for breakfast details.")
+    with st.expander("Lunch"):
+        st.write("Placeholder for lunch details.")
+    with st.expander("Dinner"):
+        st.write("Placeholder for dinner details.")
+    with st.expander("Snacks"):
+        st.write("Placeholder for snacks details.")
     
-    # Build prompt based on profile, requesting structured days.
+    # Finally, show the raw AI-generated text if you want
+    with st.expander("Raw Plan Text"):
+        st.markdown(day_content)
+
+# === API Call Functions ===
+def generate_meal_plan(profile):
+    """Generate a personalized meal plan using Mistral AI API with additional user preferences."""
+    api_key = get_mistral_api_key()
+    if not api_key:
+        return "Error: Mistral API key not found. Please set up your API key."
+    
+    # Build prompt based on profile and additional preferences
     prompt = (
         f"Generate a personalized 7-day meal plan for a {profile['age']} year old {profile['gender']} "
         f"with weight {profile['weight']}kg, height {profile['height']}cm, activity level {profile['activity']}, "
         f"dietary preferences {', '.join(profile['dietary'])}, "
+        f"Add this series of special symbols at the end of each day's meal plan '-=*=-"
     )
+    
+    # Add menstrual cycle info for females (if applicable)
     if profile['gender'] == "Female" and profile['menstrual_cycle'] != "Not Applicable":
-        prompt += f"menstrual cycle phase {profile['menstrual_cycle']}, "
+       prompt += (
+    f"User is in menstrual cycle phase {profile['menstrual_cycle']} "
+    "give suggestions to support hormonal health."
+)
+
+    
     prompt += (
         f"and a fitness goal of {profile['fitness_goal']}. "
         "Include macronutrient and micronutrient breakdown, hydration tips, and balanced meals for the day. "
@@ -55,202 +81,222 @@ def generate_meal_plan(profile):
         "max_tokens": 1500
     }
     
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
     try:
-        response = requests.post(MEAL_PLAN_API_URL, headers=headers, json=payload)
+        response = requests.post(MISTRAL_API_URL, headers=headers, json=payload)
         response.raise_for_status()
+        
         result = response.json()
         meal_plan = result["choices"][0]["message"]["content"]
+        return meal_plan
+    except requests.exceptions.RequestException as e:
+        return f"API Request Error: {str(e)}"
+    except KeyError as e:
+        return f"API Response Format Error: {str(e)}"
     except Exception as e:
-        meal_plan = f"Error generating meal plan: {e}"
-    
-    return meal_plan
+        return f"Unexpected Error: {str(e)}"
 
 def parse_meal_plan_by_day(meal_plan_text):
     """
-    Parse the meal plan text to extract daily meal plans.
-    Returns a dictionary with days as keys and meal content as values.
+    Parse the meal plan text to extract daily meal plans using the marker "-=*=-" as an optional end delimiter.
+    Returns a dictionary with day names as keys and the corresponding meal content as values.
     """
     daily_plans = {}
-    day_pattern = r'DAY\s+\d+\s*:\s*([A-Z]+)'
-    day_matches = list(re.finditer(day_pattern, meal_plan_text, re.IGNORECASE))
+    # This pattern will capture each day's section until it finds the marker "-=*=-" or the end of the text.
+    pattern = r"(?i)(DAY\s+\d+[\s:.-]*([A-Za-z]+))\s*(.*?)(?:\s*-=\*=-|$)"
     
-    for i, match in enumerate(day_matches):
-        day_name = match.group(1).capitalize()
-        start_pos = match.start()
-        end_pos = day_matches[i + 1].start() if i < len(day_matches) - 1 else len(meal_plan_text)
-        day_content = meal_plan_text[start_pos:end_pos].strip()
-        daily_plans[day_name] = day_content
-
+    matches = re.finditer(pattern, meal_plan_text, re.DOTALL)
+    for match in matches:
+        header = match.group(1).strip()
+        day_name = match.group(2).capitalize()
+        day_content = match.group(3).strip()
+        daily_plans[day_name] = f"{header}\n{day_content}"
+    
     if not daily_plans:
         daily_plans = {"Full Plan": meal_plan_text}
     
     return daily_plans
 
-def plot_nutrient_levels_for_day(day, day_plan_text):
-    """
-    Extract nutrient levels from the day's meal plan text, plot a bar chart,
-    and if any key nutrient is missing, return a suggestions string.
-    
-    Expected nutrients: Calories, Protein, Carbs, Fat, Fiber.
-    """
-    expected_nutrients = ["Calories", "Protein", "Carbs", "Fat", "Fiber"]
-    nutrient_values = {}
-    
-    for nutrient in expected_nutrients:
-        pattern = rf"{nutrient}\s*:\s*([\d\.]+)"
-        match = re.search(pattern, day_plan_text, re.IGNORECASE)
-        if match:
-            try:
-                nutrient_values[nutrient] = float(match.group(1))
-            except ValueError:
-                pass
 
-    missing_nutrients = [nutrient for nutrient in expected_nutrients if nutrient not in nutrient_values]
-    
-    fig, ax = plt.subplots(figsize=(10, 5))
-    if nutrient_values:
-        ax.bar(nutrient_values.keys(), nutrient_values.values(), color='skyblue')
-        ax.set_title(f"Nutrient Levels for {day}")
-        ax.set_ylabel("Amount")
-        ax.set_xlabel("Nutrient")
-    else:
-        ax.text(0.5, 0.5, "No nutrient data found", horizontalalignment='center', verticalalignment='center')
-        ax.axis('off')
-    
-    suggestion_text = ""
-    if missing_nutrients:
-        suggestions = {
-            "Calories": "Consider adding an energy-rich snack like a granola bar.",
-            "Protein": "Consider a protein snack such as Greek yogurt or a protein shake.",
-            "Carbs": "Consider a carb-based snack like a piece of fruit or whole grain crackers.",
-            "Fat": "Consider a healthy fat source like nuts or avocado toast.",
-            "Fiber": "Consider fiber-rich options like vegetables or whole grains."
-        }
-        suggestion_text = "Missing Nutrients:\n"
-        for nutrient in missing_nutrients:
-            suggestion_text += f"- {nutrient}: {suggestions.get(nutrient, 'Consider a nutrient-rich snack.')}\n"
-    
-    return fig, suggestion_text
-
-# ============================
-# Functions for Food Recognition & Logging
-# ============================
-def get_base64_image(uploaded_file):
-    """Encode the uploaded file to a base64 string."""
-    bytes_data = uploaded_file.getvalue()
-    base64_image = base64.b64encode(bytes_data).decode('utf-8')
-    return base64_image
-
-def get_nutritional_breakdown(base64_image):
-    """
-    Call Mistral API with the base64-encoded image to get a nutritional breakdown.
-    The prompt asks for a JSON response including keys: Calories, Protein, Carbs, Fat, and Fiber.
-    """
-    api_key = os.environ.get("MISTRAL_API_KEY")
-    if not api_key:
-        st.error("MISTRAL_API_KEY not set in environment variables.")
+def encode_image_from_bytes(image_bytes):
+    """Encode the image bytes to base64."""
+    try:
+        return base64.b64encode(image_bytes).decode('utf-8')
+    except Exception as e:
+        print(f"Error encoding image: {e}")
         return None
 
-    client = Mistral(api_key=api_key)
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        '''Whats in this image? Please provide a full nutritional breakdown of this meal in JSON format. Output JSON without any additional text. This is what the JSON output should look like. The Numbers should be operable float numbers "meal": "Pancakes with Toppings",
-  "ingredients": {
-    "pancakes": {
-      "calories": 300,
-      "carbohydrates": 50,
-      "protein": 5,
-      "fat": 5"'''
-                    )
-                },
-                {
-                    "type": "image_url",
-                    "image_url": f"data:image/jpeg;base64,{base64_image}"
-                }
-            ]
-        }
-    ]
-    
+def recognize_food(image_bytes):
+    """Recognize food in an image using Mistral's multimodal API."""
     try:
+        base64_image = encode_image_from_bytes(image_bytes)
+        if not base64_image:
+            return "Error: Failed to encode image."
+        
+        client = Mistral(api_key=api_key)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": """What's in this image? Please provide a full nutritional breakdown of this meal in JSON format. Output JSON without any additional text. This is what the JSON output should look like. The Numbers should be operable float numbers 
+                        {
+                            "meal": "Meal name",
+                            "ingredients": {
+                                "ingredient1": {
+                                    "calories": 300,
+                                    "carbohydrates": 50,
+                                    "protein": 5,
+                                    "fat": 5
+                                },
+                                "ingredient2": {
+                                    "calories": 150,
+                                    "carbohydrates": 20,
+                                    "protein": 10,
+                                    "fat": 5
+                                }
+                            },
+                            "total": {
+                                "calories": 450,
+                                "carbohydrates": 70,
+                                "protein": 15, 
+                                "fat": 10
+                            }
+                        }"""
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": f"data:image/jpeg;base64,{base64_image}"
+                    }
+                ]
+            }
+        ]
+        
         chat_response = client.chat.complete(
-            model=FOOD_MODEL,
+            model="pixtral-12b-2409",
             messages=messages
         )
-        return chat_response.choices[0].message.content
-    except Exception as e:
-        st.error(f"API call failed: {e}")
-        return None
-
-def log_food(nutritional_info):
-    """
-    Log the nutritional info of a food item into the daily food intake log stored in session_state.
-    """
-    if "food_log" not in st.session_state:
-        st.session_state.food_log = []
-    st.session_state.food_log.append(nutritional_info)
-
-def plot_food_log():
-    """
-    Aggregate the logged food items and create a bar chart that sums the key nutrients.
-    """
-    if "food_log" not in st.session_state or not st.session_state.food_log:
-        st.write("No food logged yet.")
-        return
-    
-    keys = ["Calories", "Protein", "Carbs", "Fat", "Fiber"]
-    aggregated = {key: 0 for key in keys}
-    
-    for entry in st.session_state.food_log:
-        for key in keys:
-            try:
-                aggregated[key] += float(entry.get(key, 0))
-            except (ValueError, TypeError):
-                pass
-    
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.bar(aggregated.keys(), aggregated.values(), color='skyblue')
-    ax.set_title("Daily Nutrient Totals")
-    ax.set_ylabel("Total Amount")
-    ax.set_xlabel("Nutrient")
-    st.pyplot(fig)
-    
-    st.write("Aggregated Nutritional Info:", aggregated)
-
-# ============================
-# Main App: Sidebar Navigation
-# ============================
-def main():
-    st.title("Multi-Feature Nutrition App")
-    
-    app_mode = st.sidebar.radio("Select Mode", ["Meal Plan Generator", "Food Recognition & Logging"])
-    
-    if app_mode == "Meal Plan Generator":
-        st.header("Generate Your Meal Plan")
-        # Initialize session state for meal plan
-        if 'meal_plan' not in st.session_state:
-            st.session_state.meal_plan = None
-        if 'daily_plans' not in st.session_state:
-            st.session_state.daily_plans = {}
-        if 'current_day' not in st.session_state:
-            st.session_state.current_day = None
+        response_content = chat_response.choices[0].message.content
         
-        # User Profile Setup
-        st.sidebar.subheader("User Profile Setup")
-        age = st.sidebar.number_input("Age", min_value=10, max_value=100, value=30)
-        gender = st.sidebar.selectbox("Gender", ["Female", "Male"])
-        weight = st.sidebar.number_input("Weight (kg)", min_value=30, max_value=200, value=70)
-        height = st.sidebar.number_input("Height (cm)", min_value=100, max_value=250, value=170)
-        activity = st.sidebar.selectbox("Activity Level", ["Sedentary", "Lightly Active", "Active", "Very Active"])
-        dietary = st.sidebar.multiselect("Dietary Preferences", ["Vegan", "Vegetarian", "Keto", "Halal", "Gluten-Free", "None"])
-        menstrual_cycle = "Not Applicable"
-        if gender == "Female":
-            menstrual_cycle = st.sidebar.selectbox("Menstrual Cycle Phase", ["Not Applicable", "Follicular", "Ovulatory", "Luteal", "Menstrual"])
-        fitness_goal = st.sidebar.selectbox("Fitness Goals", ["Weight Loss", "Muscle Gain", "Maintenance"])
+        try:
+            json_content = response_content
+            if not response_content.strip().startswith('{'):
+                json_match = re.search(r'```json\s*(.*?)\s*```', response_content, re.DOTALL)
+                if json_match:
+                    json_content = json_match.group(1)
+                else:
+                    json_match = re.search(r'(\{.*\})', response_content, re.DOTALL)
+                    if json_match:
+                        json_content = json_match.group(1)
+            
+            nutritional_data = json.loads(json_content)
+            detected_items = list(nutritional_data.get('ingredients', {}).keys())
+            if not detected_items and 'meal' in nutritional_data:
+                detected_items = [nutritional_data['meal']]
+            
+            nutritional_analysis = format_nutritional_data(nutritional_data)
+            
+            return {
+                "detected_items": detected_items,
+                "nutritional_analysis": nutritional_analysis,
+                "raw_data": nutritional_data
+            }
+        except json.JSONDecodeError:
+            return {
+                "detected_items": ["Unknown"],
+                "nutritional_analysis": "Could not parse nutritional data. Here's the raw response:\n\n" + response_content
+            }
+            
+    except Exception as e:
+        return f"Error recognizing food: {str(e)}"
+
+def format_nutritional_data(data):
+    """Format the nutritional data from JSON to a readable format."""
+    result = []
+    if 'meal' in data:
+        result.append(f"## {data['meal']}")
+    if 'ingredients' in data:
+        result.append("### Ingredients:")
+        for ingredient, nutrients in data['ingredients'].items():
+            result.append(f"#### {ingredient.title()}")
+            for nutrient, value in nutrients.items():
+                unit = "g" if nutrient != "calories" else "kcal"
+                result.append(f"- {nutrient.title()}: {value} {unit}")
+    if 'total' in data:
+        result.append("### Total Nutritional Value:")
+        for nutrient, value in data['total'].items():
+            unit = "g" if nutrient != "calories" else "kcal"
+            result.append(f"- {nutrient.title()}: {value} {unit}")
+    return "\n".join(result)
+
+def save_meal_plan(profile, meal_plan):
+    """Save the generated meal plan to history."""
+    if 'meal_plan_history' not in st.session_state:
+        st.session_state.meal_plan_history = []
+    
+    plan_id = str(uuid.uuid4())[:8]
+    profile_summary = f"{profile['gender']}, {profile['age']}yo, {profile['weight']}kg, {profile['height']}cm, {profile['fitness_goal']}"
+    meal_plan_entry = {
+        "id": plan_id,
+        "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "profile": profile_summary,
+        "details": profile,
+        "plan": meal_plan,
+        "daily_plans": parse_meal_plan_by_day(meal_plan)
+    }
+    
+    st.session_state.meal_plan_history.insert(0, meal_plan_entry)
+    return plan_id
+
+def load_meal_plan_from_history(plan_id):
+    """Load a specific meal plan from history."""
+    if 'meal_plan_history' not in st.session_state:
+        return None
+    for plan in st.session_state.meal_plan_history:
+        if plan["id"] == plan_id:
+            return plan
+    return None
+
+# === Streamlit UI ===
+def main():
+    st.title("🍽 AI-Powered Meal Plan Generator")
+    
+    if 'meal_plan' not in st.session_state:
+        st.session_state.meal_plan = None
+    if 'daily_plans' not in st.session_state:
+        st.session_state.daily_plans = {}
+    if 'current_day' not in st.session_state:
+        st.session_state.current_day = None
+    if 'meal_plan_history' not in st.session_state:
+        st.session_state.meal_plan_history = []
+    if 'current_plan_id' not in st.session_state:
+        st.session_state.current_plan_id = None
+    if 'history_current_day' not in st.session_state:
+        st.session_state.history_current_day = None
+    
+    tab1, tab2 = st.tabs(["Meal Plan Generator", "Meal Plan History"])
+    
+    with tab1:
+        with st.sidebar:
+            st.header("User Profile Setup")
+            age = st.number_input("Age", min_value=10, max_value=100, value=30)
+            gender = st.selectbox("Gender", ["Female", "Male"])
+            weight = st.number_input("Weight (kg)", min_value=30, max_value=200, value=70)
+            height = st.number_input("Height (cm)", min_value=100, max_value=250, value=170)
+            additional_preferences = st.text_area("Additional Preferences", "Enter any foods you like/dislike, specific dietary needs, or other preferences here...").strip()
+            activity = st.selectbox("Activity Level", ["Sedentary", "Lightly Active", "Active", "Very Active"])
+            dietary = st.multiselect("Dietary Preferences", ["Vegan", "Vegetarian", "Halal", "Kosher", "Gluten-Free", "None"])
+            menstrual_cycle = "Not Applicable"
+            if gender == "Female":
+                menstrual_cycle = st.selectbox("Menstrual Cycle Phase", ["Not Applicable", "Follicular", "Ovulatory", "Luteal", "Menstrual"])
+            fitness_goal = st.selectbox("Fitness Goals", ["Weight Loss", "Muscle Gain", "Maintenance"])
+             
+        
         profile = {
             "age": age,
             "gender": gender,
@@ -260,63 +306,135 @@ def main():
             "dietary": dietary if dietary else ["None"],
             "menstrual_cycle": menstrual_cycle,
             "fitness_goal": fitness_goal,
+            "additional_preferences": additional_preferences
+
         }
         
-        if st.button("Generate 7-Day Meal Plan"):
-            with st.spinner("Generating meal plan..."):
-                meal_plan = generate_meal_plan(profile)
-                st.session_state.meal_plan = meal_plan
-                daily_plans = parse_meal_plan_by_day(meal_plan)
-                st.session_state.daily_plans = daily_plans
-                if daily_plans:
-                    st.session_state.current_day = list(daily_plans.keys())[0]
+        st.header("Generate Your Meal Plan")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            generate_button = st.button("Generate 7-Day Meal Plan", use_container_width=True)
         
-        if st.session_state.meal_plan:
-            st.subheader("Navigate Your Meal Plan")
-            cols = st.columns(len(st.session_state.daily_plans))
-            for i, day in enumerate(st.session_state.daily_plans.keys()):
-                if cols[i].button(day):
-                    st.session_state.current_day = day
-            if st.session_state.current_day:
-                st.markdown(f"### {st.session_state.current_day}'s Meal Plan")
-                st.markdown(st.session_state.daily_plans[st.session_state.current_day])
-                fig, suggestion_text = plot_nutrient_levels_for_day(
-                    st.session_state.current_day,
-                    st.session_state.daily_plans[st.session_state.current_day]
-                )
-                st.pyplot(fig)
-                if suggestion_text:
-                    st.markdown("### Suggestions to Fill Nutrient Gaps")
-                    st.write(suggestion_text)
+        if generate_button:
+            if not get_mistral_api_key():
+                st.error("Missing Mistral API key. Please configure it to generate meal plans.")
+            else:
+                with st.spinner("Generating meal plan..."):
+                    meal_plan = generate_meal_plan(profile)
+                    if isinstance(meal_plan, str) and meal_plan.startswith("Error"):
+                        st.error(meal_plan)
+                    else:
+                        st.session_state.meal_plan = meal_plan
+                        daily_plans = parse_meal_plan_by_day(meal_plan)
+                        st.session_state.daily_plans = daily_plans
+                        if daily_plans:
+                            st.session_state.current_day = list(daily_plans.keys())[0]
+                        plan_id = save_meal_plan(profile, meal_plan)
+                        st.session_state.current_plan_id = plan_id
+                        st.success(f"Meal plan generated and saved to history (ID: {plan_id})!")
+        
+        # --- Display the selected day in collapsible sections ---
+        if st.session_state.meal_plan and st.session_state.current_day:
+            st.markdown(f"### {st.session_state.current_day}'s Meal Plan")
+            display_collapsible_meal_plan(st.session_state.daily_plans[st.session_state.current_day])
+            
             with st.expander("View Complete Meal Plan"):
                 st.markdown("### Your Complete 7-Day Meal Plan")
                 st.write(st.session_state.meal_plan)
-    
-    elif app_mode == "Food Recognition & Logging":
-        st.header("Food Recognition & Nutritional Breakdown")
+        
+        st.header("Food Recognition & Logging")
         uploaded_file = st.file_uploader("Upload an image of your meal", type=["jpg", "jpeg", "png"])
         if uploaded_file is not None:
             image = Image.open(uploaded_file)
             st.image(image, caption="Uploaded Meal", use_column_width=True)
-            if st.button("Analyze Image"):
-                with st.spinner("Analyzing image..."):
-                    base64_image = get_base64_image(uploaded_file)
-                    result = get_nutritional_breakdown(base64_image)
-                if result:
-                    st.subheader("Nutritional Breakdown (JSON)")
-                    st.code(result, language="json")
-                    # Try parsing the JSON (if it's valid)
-                    try:
-                        nutritional_info = json.loads(result)
-                    except Exception as e:
-                        st.error(f"Error parsing JSON: {e}")
-                        nutritional_info = None
-                    if nutritional_info:
-                        if st.button("Log this Food"):
-                            log_food(nutritional_info)
-                            st.success("Food logged successfully!")
-        st.header("Daily Food Intake Log")
-        plot_food_log()
+            if st.button("Analyze Food"):
+                if not get_mistral_api_key():
+                    st.error("Mistral API key is required for food analysis.")
+                else:
+                    with st.spinner("Analyzing your food..."):
+                        img_byte_arr = io.BytesIO()
+                        image.save(img_byte_arr, format=image.format)
+                        img_byte_arr = img_byte_arr.getvalue()
+                        food_info = recognize_food(img_byte_arr)
+                        st.markdown("### Food Analysis Results")
+                        if isinstance(food_info, dict):
+                            if "detected_items" in food_info:
+                                st.subheader("Detected Items")
+                                st.write(", ".join(food_info["detected_items"]))
+                            if "nutritional_analysis" in food_info:
+                                st.subheader("Nutritional Analysis")
+                                st.markdown(food_info["nutritional_analysis"])
+                            if "raw_data" in food_info:
+                                with st.expander("View Raw Data"):
+                                    st.json(food_info["raw_data"])
+                        else:
+                            st.error(food_info)
+    
+    with tab2:
+        st.header("Your Meal Plan History")
+        if not st.session_state.meal_plan_history:
+            st.info("No meal plans have been generated yet. Generate a meal plan to see it here.")
+        else:
+            history_data = []
+            for plan in st.session_state.meal_plan_history:
+                history_data.append({
+                    "ID": plan["id"],
+                    "Date": plan["date"],
+                    "Profile": plan["profile"],
+                })
+            history_df = pd.DataFrame(history_data)
+            st.dataframe(history_df, use_container_width=True)
+            selected_plan_id = st.selectbox(
+                "Select a meal plan to view:", 
+                options=[plan["id"] for plan in st.session_state.meal_plan_history],
+                format_func=lambda x: f"{x} - " + next((p["date"] + " (" + p["profile"] + ")" for p in st.session_state.meal_plan_history if p["id"] == x), "")
+            )
+            if selected_plan_id:
+                selected_plan = load_meal_plan_from_history(selected_plan_id)
+                if selected_plan:
+                    st.subheader(f"Meal Plan {selected_plan['id']} - {selected_plan['date']}")
+                    with st.expander("View Profile Details"):
+                        profile_details = selected_plan["details"]
+                        cols = st.columns(3)
+                        cols[0].write(f"**Age:** {profile_details['age']}")
+                        cols[0].write(f"**Gender:** {profile_details['gender']}")
+                        cols[1].write(f"**Weight:** {profile_details['weight']} kg")
+                        cols[1].write(f"**Height:** {profile_details['height']} cm")
+                        cols[2].write(f"**Activity:** {profile_details['activity']}")
+                        cols[2].write(f"**Goal:** {profile_details['fitness_goal']}")
+                        st.write(f"**Dietary Preferences:** {', '.join(profile_details['dietary'])}")
+                        if profile_details['gender'] == 'Female' and profile_details['menstrual_cycle'] != 'Not Applicable':
+                            st.write(f"**Menstrual Cycle Phase:** {profile_details['menstrual_cycle']}")
+                    
+                    st.subheader("Navigate Days")
+                    days = list(selected_plan["daily_plans"].keys())
+                    num_days = len(days)
+                    cols_per_row = min(7, num_days)
+                    for i in range(0, num_days, cols_per_row):
+                        row_days = days[i:i+cols_per_row]
+                        cols = st.columns(len(row_days))
+                        for j, day in enumerate(row_days):
+                            if cols[j].button(day, key=f"history_day_{day}_{selected_plan_id}"):
+                                st.session_state.history_current_day = day
+                    
+                    if st.session_state.history_current_day is None or st.session_state.history_current_day not in selected_plan["daily_plans"]:
+                        st.session_state.history_current_day = days[0]
+                    
+                    current_day = st.session_state.history_current_day
+                    st.markdown(f"### {current_day}'s Meal Plan")
+                    # Use the new collapsible display here as well:
+                    display_collapsible_meal_plan(selected_plan["daily_plans"][current_day])
+                    
+                    with st.expander("View Complete Meal Plan"):
+                        st.markdown("### Complete 7-Day Meal Plan")
+                        st.write(selected_plan["plan"])
+                    
+                    if st.button("Use This Plan Again", key=f"use_plan_{selected_plan_id}"):
+                        st.session_state.meal_plan = selected_plan["plan"]
+                        st.session_state.daily_plans = selected_plan["daily_plans"]
+                        st.session_state.current_day = list(selected_plan["daily_plans"].keys())[0]
+                        st.session_state.current_plan_id = selected_plan["id"]
+                        st.success("Plan loaded into the current session! Switch to the Meal Plan Generator tab to view it.")
 
 if __name__ == "__main__":
     main()
